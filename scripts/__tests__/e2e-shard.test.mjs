@@ -29,10 +29,10 @@ function readTrustedPrWorkflow() {
   const caller = readFileSync(prCallerWorkflow, "utf8");
   assert.match(
     caller,
-    /^\s+uses: paperclipai\/paperclip\/\.github\/workflows\/pr-trusted\.yml@master\s*$/m,
-    "pr.yml must call the trusted workflow from CODEOWNERS-protected master",
+    /^\s+uses: \.\/\.github\/workflows\/pr-trusted\.yml\s*$/m,
+    "pr.yml must use the workflow version reviewed in this repository",
   );
-  // Validate proposed workflow changes locally; CI executes the merged master version.
+  // Local reusable workflows execute from the same PR revision as the caller.
   return readFileSync(trustedPrWorkflow, "utf8");
 }
 
@@ -157,8 +157,13 @@ test("shard arguments are validated", () => {
   }
 });
 
-test("pr.yml calls the trusted PR workflow from master", () => {
+test("pr.yml calls this repository's reviewed PR workflow", () => {
   assert.ok(readTrustedPrWorkflow().length > 0);
+  const caller = readFileSync(prCallerWorkflow, "utf8");
+  assert.doesNotMatch(caller, /pull_request_target|secrets: inherit|secrets\./,
+    "PR checks must not receive privileged workflow credentials");
+  assert.doesNotMatch(caller, /^\s+(?:contents|actions|pull-requests): write$/m,
+    "PR checks require read-only repository permissions");
 });
 
 test("the trusted PR workflow keeps a stable aggregate check named e2e over the shard matrix", () => {

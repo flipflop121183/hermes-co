@@ -10,6 +10,35 @@ permissions:
 
 jobs:
   ci:
-    # Master requires CODEOWNERS review for .github/**, including this workflow.
-    # The AWS runner group permits pr-trusted.yml@refs/heads/master.
-    uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@master
+    # Version the inherited checks with this repository's reviewed PR tree.
+    uses: ./.github/workflows/pr-trusted.yml
+  business_ops:
+    name: Business Ops safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 9.15.4
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: node scripts/ensure-plugin-build-deps.mjs
+      - name: Check generated migration and safety
+        run: pnpm --filter @paperclipai/db check:migrations
+      - name: Test permissions, fresh databases, and prototype upgrades
+        run: >-
+          pnpm exec vitest run
+          packages/shared/src/validators/business-ops.test.ts
+          packages/db/src/migration-snapshot-drift.test.ts
+          packages/db/src/business-ops-migration.test.ts
+          server/src/routes/business-ops-access.test.ts
+          server/src/routes/business-ops.test.ts
+      - run: pnpm check:token-gates

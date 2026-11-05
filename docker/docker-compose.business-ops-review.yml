@@ -1,0 +1,53 @@
+# Review template only. Use a fresh project, image, credentials, and volumes.
+# Never attach existing Paperclip or Hermes data to this project.
+name: ${HERMES_REVIEW_PROJECT:?Choose an unused review project name}
+services:
+  db:
+    image: ${HERMES_REVIEW_POSTGRES_IMAGE:?Set a reviewed postgres image digest}
+    environment:
+      POSTGRES_USER: hermes_review
+      POSTGRES_PASSWORD: ${HERMES_REVIEW_DB_PASSWORD:?Use a new random hex password}
+      POSTGRES_DB: hermes_review
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - review-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hermes_review -d hermes_review"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [review]
+  server:
+    # Build the production target from the reviewed commit, then pin its digest.
+    image: ${HERMES_REVIEW_IMAGE:?Set the reviewed application image digest}
+    pids_limit: 512
+    ports:
+      - "127.0.0.1:3310:3100"
+    environment:
+      DATABASE_URL: postgres://hermes_review:${HERMES_REVIEW_DB_PASSWORD:?Use a new random hex password}@db:5432/hermes_review
+      HOST: "0.0.0.0"
+      PORT: "3100"
+      SERVE_UI: "true"
+      PAPERCLIP_HOME: /paperclip
+      PAPERCLIP_DEPLOYMENT_MODE: authenticated
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: private
+      PAPERCLIP_PUBLIC_URL: "http://localhost:3310"
+      BETTER_AUTH_SECRET: ${HERMES_REVIEW_AUTH_SECRET:?Use a new random auth secret}
+      PAPERCLIP_MIGRATION_AUTO_APPLY: "false"
+      PAPERCLIP_MIGRATION_PROMPT: never
+      HEARTBEAT_SCHEDULER_ENABLED: "false"
+      PAPERCLIP_SECRETS_STRICT_MODE: "true"
+    volumes:
+      - review-app:/paperclip
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [review]
+# No external routes, provider credentials, gateway endpoints, Docker socket,
+# host profile mounts, public database port, or shared external volumes.
+networks:
+  review:
+    internal: true
+volumes:
+  review-db:
+  review-app:

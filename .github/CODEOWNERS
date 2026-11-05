@@ -1,18 +1,18 @@
-# Replace @cryppadotta if a different maintainer or team should own release infrastructure.
+# Company repository owner. GitHub rulesets must separately require this review.
+# Builder has no bypass, administration, release, or deployment authority.
+* @flipflop121183
 
-.github/** @cryppadotta @devinfoley @nickyleach @forgottendev
-scripts/release*.sh @cryppadotta @devinfoley @nickyleach @forgottendev
-scripts/release-*.mjs @cryppadotta @devinfoley @nickyleach @forgottendev
-scripts/create-github-release.sh @cryppadotta @devinfoley @nickyleach @forgottendev
-scripts/rollback-latest.sh @cryppadotta @devinfoley @nickyleach @forgottendev
-doc/RELEASING.md @cryppadotta @devinfoley @nickyleach @forgottendev @tonio-alucema @scotttong
-doc/PUBLISHING.md @cryppadotta @devinfoley @nickyleach @forgottendev
-doc/RELEASE-AUTOMATION-SETUP.md @cryppadotta @devinfoley @nickyleach @forgottendev
-skills/** @cryppadotta @devinfoley @nickyleach @forgottendev
-
-# Package files — dependency changes require review
-# package.json matches recursively at all depths (covers root + all workspaces)
-package.json @cryppadotta @devinfoley @nickyleach @forgottendev
-pnpm-lock.yaml @cryppadotta @devinfoley @nickyleach @forgottendev
-pnpm-workspace.yaml @cryppadotta @devinfoley @nickyleach @forgottendev
-.npmrc @cryppadotta @devinfoley @nickyleach @forgottendev
+# Keep the owner responsible for permission, data, and automation boundaries.
+.github/** @flipflop121183
+packages/db/** @flipflop121183
+server/src/auth/** @flipflop121183
+server/src/routes/authz.ts @flipflop121183
+server/src/routes/business-ops* @flipflop121183
+packages/shared/src/validators/business-ops* @flipflop121183
+docker/** @flipflop121183
+Dockerfile @flipflop121183
+scripts/release* @flipflop121183
+package.json @flipflop121183
+pnpm-lock.yaml @flipflop121183
+pnpm-workspace.yaml @flipflop121183
+.npmrc @flipflop121183

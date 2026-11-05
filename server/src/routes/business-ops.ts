@@ -3,376 +3,205 @@ import { Router, type Request } from "express";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
-import { badRequest, notFound } from "../errors.js";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import {
+  offeringCreateSchema, offeringUpdateSchema, orderCreateSchema, orderUpdateSchema,
+  documentCreateSchema, documentUpdateSchema, archiveBusinessRecordSchema, type OrderStatus,
+} from "@paperclipai/shared";
+import { logger } from "../middleware/logger.js";
+import { badRequest, conflict, notFound } from "../errors.js";
+import { getActorInfo } from "./authz.js";
+import { assertBusinessOpsAccess, canManageBusinessOps } from "./business-ops-access.js";
+import { logActivity, publishActivity, type ActivityPublication } from "../services/activity-log.js";
 
-/**
- * Business Ops module: a self-contained, first-party addition on top of the
- * stock Paperclip platform. It gives a company running on Paperclip the
- * pieces an actual business needs on top of "manage my agents":
- *
- *   - offerings: the catalog of software products and services the company
- *     sells (price, billing model, status)
- *   - orders: sales/orders placed by customers against that catalog
- *   - documents: the company's knowledge base — policies, SOPs, product
- *     docs, and general company knowledge, housed directly in the app
- *
- * It intentionally avoids touching the core drizzle migration pipeline
- * (packages/db migrations + check-migration-safety/.test.ts): these tables
- * are owned and bootstrapped by this module alone via idempotent
- * `CREATE TABLE IF NOT EXISTS`, so it can't destabilize the platform's own
- * schema history. Swap this for a real drizzle migration later if this
- * module graduates to a first-class schema citizen.
- */
+type Row = Record<string, unknown>;
+type Table = "business_ops_offerings" | "business_ops_orders" | "business_ops_documents";
+const uuid = z.string().uuid();
+const company = (req: Request) => uuid.parse(req.params.companyId);
+const recordId = (req: Request) => uuid.parse(req.params.id);
+const transitions: Record<OrderStatus, OrderStatus[]> = {
+  pending: ["paid", "cancelled"], paid: ["fulfilled", "refunded"],
+  fulfilled: ["refunded"], cancelled: [], refunded: [],
+};
 
-let schemaReadyPromise: Promise<void> | null = null;
-
-async function ensureBusinessOpsSchema(db: Db): Promise<void> {
-  if (!schemaReadyPromise) {
-    schemaReadyPromise = (async () => {
-      await db.execute(sql`
-        CREATE TABLE IF NOT EXISTS business_ops_offerings (
-          id UUID PRIMARY KEY,
-          company_id UUID NOT NULL,
-          kind TEXT NOT NULL CHECK (kind IN ('product', 'service')),
-          name TEXT NOT NULL,
-          description TEXT NOT NULL DEFAULT '',
-          price_cents INTEGER NOT NULL DEFAULT 0,
-          currency TEXT NOT NULL DEFAULT 'usd',
-          billing TEXT NOT NULL DEFAULT 'one_time' CHECK (billing IN ('one_time', 'subscription')),
-          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'draft', 'archived')),
-          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        )
-      `);
-      await db.execute(sql`
-        CREATE INDEX IF NOT EXISTS business_ops_offerings_company_idx
-          ON business_ops_offerings (company_id)
-      `);
-      await db.execute(sql`
-        CREATE TABLE IF NOT EXISTS business_ops_orders (
-          id UUID PRIMARY KEY,
-          company_id UUID NOT NULL,
-          customer_name TEXT NOT NULL,
-          customer_email TEXT,
-          items JSONB NOT NULL DEFAULT '[]',
-          total_cents INTEGER NOT NULL DEFAULT 0,
-          currency TEXT NOT NULL DEFAULT 'usd',
-          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'paid', 'fulfilled', 'cancelled', 'refunded')),
-          notes TEXT NOT NULL DEFAULT '',
-          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        )
-      `);
-      await db.execute(sql`
-        CREATE INDEX IF NOT EXISTS business_ops_orders_company_idx
-          ON business_ops_orders (company_id)
-      `);
-      await db.execute(sql`
-        CREATE TABLE IF NOT EXISTS business_ops_documents (
-          id UUID PRIMARY KEY,
-          company_id UUID NOT NULL,
-          category TEXT NOT NULL DEFAULT 'knowledge'
-            CHECK (category IN ('knowledge', 'policy', 'sop', 'product_doc', 'company_doc')),
-          title TEXT NOT NULL,
-          content TEXT NOT NULL DEFAULT '',
-          tags JSONB NOT NULL DEFAULT '[]',
-          created_by TEXT,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        )
-      `);
-      await db.execute(sql`
-        CREATE INDEX IF NOT EXISTS business_ops_documents_company_idx
-          ON business_ops_documents (company_id)
-      `);
-    })();
+function checkVersion(row: Row, expected: number) {
+  if (row.version !== expected) throw conflict("Record changed. Refresh before editing.");
+}
+async function lockRecord(db: Db, table: Table, companyId: string, id: string): Promise<Row> {
+  const [row] = await db.execute(sql`SELECT * FROM ${sql.identifier(table)} WHERE id = ${id} AND company_id = ${companyId} FOR UPDATE`);
+  if (!row) throw notFound("Business record not found");
+  return row;
+}
+function requireEvidence(status: OrderStatus, evidence?: string | null) {
+  if (["paid", "fulfilled", "refunded"].includes(status) && !evidence?.trim()) {
+    throw badRequest("An evidence reference is required for this recorded status; no payment is executed.");
   }
-  await schemaReadyPromise;
 }
-
-const offeringCreateSchema = z.object({
-  kind: z.enum(["product", "service"]),
-  name: z.string().trim().min(1).max(200),
-  description: z.string().trim().max(10_000).optional().default(""),
-  priceCents: z.number().int().min(0).optional().default(0),
-  currency: z.string().trim().min(1).max(10).optional().default("usd"),
-  billing: z.enum(["one_time", "subscription"]).optional().default("one_time"),
-  status: z.enum(["active", "draft", "archived"]).optional().default("active"),
-});
-const offeringUpdateSchema = offeringCreateSchema.partial();
-
-const orderItemSchema = z.object({
-  offeringId: z.string().uuid().optional(),
-  name: z.string().trim().min(1).max(200),
-  quantity: z.number().int().min(1).optional().default(1),
-  unitPriceCents: z.number().int().min(0).optional().default(0),
-});
-const orderCreateSchema = z.object({
-  customerName: z.string().trim().min(1).max(200),
-  customerEmail: z.string().trim().email().optional().or(z.literal("")).optional(),
-  items: z.array(orderItemSchema).min(1),
-  currency: z.string().trim().min(1).max(10).optional().default("usd"),
-  status: z.enum(["pending", "paid", "fulfilled", "cancelled", "refunded"]).optional().default("pending"),
-  notes: z.string().trim().max(10_000).optional().default(""),
-});
-const orderUpdateSchema = z.object({
-  customerName: z.string().trim().min(1).max(200).optional(),
-  customerEmail: z.string().trim().email().optional().or(z.literal("")).optional(),
-  items: z.array(orderItemSchema).min(1).optional(),
-  status: z.enum(["pending", "paid", "fulfilled", "cancelled", "refunded"]).optional(),
-  notes: z.string().trim().max(10_000).optional(),
-});
-
-const documentCreateSchema = z.object({
-  category: z.enum(["knowledge", "policy", "sop", "product_doc", "company_doc"]).optional().default("knowledge"),
-  title: z.string().trim().min(1).max(300),
-  content: z.string().trim().max(200_000).optional().default(""),
-  tags: z.array(z.string().trim().min(1).max(50)).optional().default([]),
-});
-const documentUpdateSchema = documentCreateSchema.partial();
-
-function totalCentsOf(items: z.infer<typeof orderItemSchema>[]): number {
-  return items.reduce((sum, item) => sum + item.quantity * item.unitPriceCents, 0);
-}
-
-function requireCompanyId(req: Request): string {
-  const companyId = req.params.companyId;
-  if (!companyId) throw badRequest("companyId is required");
-  return companyId;
+async function preserveDocument(db: Db, row: Row, actorId: string) {
+  await db.execute(sql`INSERT INTO business_ops_document_revisions (id, company_id, document_id, version, snapshot, actor_id)
+    VALUES (${randomUUID()}, ${row.company_id}, ${row.id}, ${row.version}, ${JSON.stringify(row)}::jsonb, ${actorId})
+    ON CONFLICT (document_id, version) DO NOTHING`);
 }
 
 export function businessOpsRoutes(db: Db) {
   const router = Router();
-
-  router.use(async (req, _res, next) => {
-    try {
-      await ensureBusinessOpsSchema(db);
-      next();
-    } catch (err) {
-      next(err);
-    }
+  // Scope auth to this module. Schema changes belong exclusively to migrations.
+  router.use("/companies/:companyId/business-ops", (req, _res, next) => {
+    try { assertBusinessOpsAccess(req, company(req)); next(); } catch (err) { next(err); }
   });
-
-  // ---- Offerings (products & services catalog) ----
+  async function mutate(req: Request, action: string, entityType: string, work: (tx: Db) => Promise<Row>) {
+    const publications: ActivityPublication[] = [];
+    const actor = getActorInfo(req);
+    const row = await db.transaction(async (transaction) => {
+      const tx = transaction as unknown as Db;
+      const result = await work(tx);
+      await logActivity(tx, {
+        companyId: company(req), actorType: actor.actorType, actorId: actor.actorId,
+        action, entityType, entityId: String(result.id),
+        // The shared activity feed must never contain customer details or document bodies.
+        details: { version: result.version, authorizationSource: actor.actorSource },
+      }, publications);
+      return result;
+    });
+    for (const publication of publications) {
+      try { publishActivity(publication); }
+      catch (err) { logger.warn({ err }, "Business Ops activity notification failed after commit"); }
+    }
+    return row;
+  }
+  router.get("/companies/:companyId/business-ops/access", (req, res) => res.json({ canWrite: canManageBusinessOps(req, company(req)) }));
 
   router.get("/companies/:companyId/business-ops/offerings", async (req, res) => {
-    const companyId = requireCompanyId(req);
-    assertCompanyAccess(req, companyId);
-    const kind = typeof req.query.kind === "string" ? req.query.kind : undefined;
-    const offerings = kind
-      ? await db.execute(sql`
-          SELECT * FROM business_ops_offerings
-          WHERE company_id = ${companyId} AND kind = ${kind}
-          ORDER BY created_at DESC
-        `)
-      : await db.execute(sql`
-          SELECT * FROM business_ops_offerings
-          WHERE company_id = ${companyId}
-          ORDER BY created_at DESC
-        `);
+    const kind = z.enum(["product", "service"]).optional().parse(req.query.kind);
+    const offerings = await db.execute(sql`SELECT * FROM business_ops_offerings WHERE company_id = ${company(req)} AND status <> 'archived'
+      ${kind ? sql`AND kind = ${kind}` : sql``} ORDER BY created_at DESC`);
     res.json({ offerings });
   });
-
   router.post("/companies/:companyId/business-ops/offerings", async (req, res) => {
-    const companyId = requireCompanyId(req);
-    assertCompanyAccess(req, companyId);
-    const body = offeringCreateSchema.parse(req.body);
-    const id = randomUUID();
-    const [offering] = await db.execute(sql`
-      INSERT INTO business_ops_offerings
-        (id, company_id, kind, name, description, price_cents, currency, billing, status)
-      VALUES
-        (${id}, ${companyId}, ${body.kind}, ${body.name}, ${body.description},
-         ${body.priceCents}, ${body.currency}, ${body.billing}, ${body.status})
-      RETURNING *
-    `);
+    const b = offeringCreateSchema.parse(req.body);
+    const offering = await mutate(req, "business_offering.created", "business_offering", async (tx) => {
+      const [row] = await tx.execute(sql`INSERT INTO business_ops_offerings (id, company_id, kind, name, description, price_cents, currency, billing, status)
+        VALUES (${randomUUID()}, ${company(req)}, ${b.kind}, ${b.name}, ${b.description}, ${b.priceCents}, ${b.currency}, ${b.billing}, ${b.status}) RETURNING *`);
+      return row!;
+    });
     res.status(201).json({ offering });
   });
-
   router.patch("/companies/:companyId/business-ops/offerings/:id", async (req, res) => {
-    const companyId = requireCompanyId(req);
-    assertCompanyAccess(req, companyId);
-    const body = offeringUpdateSchema.parse(req.body);
-    const [current] = (await db.execute(sql`
-      SELECT * FROM business_ops_offerings WHERE id = ${req.params.id} AND company_id = ${companyId}
-    `)) as Record<string, unknown>[];
-    if (!current) throw notFound("Offering not found");
-    const merged = {
-      kind: body.kind ?? (current.kind as string),
-      name: body.name ?? (current.name as string),
-      description: body.description ?? (current.description as string),
-      priceCents: body.priceCents ?? (current.price_cents as number),
-      currency: body.currency ?? (current.currency as string),
-      billing: body.billing ?? (current.billing as string),
-      status: body.status ?? (current.status as string),
-    };
-    const [offering] = await db.execute(sql`
-      UPDATE business_ops_offerings
-      SET kind = ${merged.kind}, name = ${merged.name}, description = ${merged.description},
-          price_cents = ${merged.priceCents}, currency = ${merged.currency},
-          billing = ${merged.billing}, status = ${merged.status}, updated_at = now()
-      WHERE id = ${req.params.id} AND company_id = ${companyId}
-      RETURNING *
-    `);
+    const b = offeringUpdateSchema.parse(req.body);
+    const offering = await mutate(req, "business_offering.updated", "business_offering", async (tx) => {
+      const c = await lockRecord(tx, "business_ops_offerings", company(req), recordId(req));
+      checkVersion(c, b.expectedVersion);
+      const [row] = await tx.execute(sql`UPDATE business_ops_offerings SET kind = ${b.kind ?? c.kind}, name = ${b.name ?? c.name},
+        description = ${b.description ?? c.description}, price_cents = ${b.priceCents ?? c.price_cents}, currency = ${b.currency ?? c.currency},
+        billing = ${b.billing ?? c.billing}, status = ${b.status ?? c.status}, version = version + 1, updated_at = now()
+        WHERE id = ${c.id} AND company_id = ${company(req)} RETURNING *`);
+      return row!;
+    });
     res.json({ offering });
   });
-
-  router.delete("/companies/:companyId/business-ops/offerings/:id", async (req, res) => {
-    const companyId = requireCompanyId(req);
-    assertCompanyAccess(req, companyId);
-    await db.execute(sql`
-      DELETE FROM business_ops_offerings WHERE id = ${req.params.id} AND company_id = ${companyId}
-    `);
-    res.status(204).end();
-  });
-
-  // ---- Orders (sales) ----
+  // Old DELETE clients cannot destroy records. Archiving uses PATCH + expectedVersion.
+  router.delete("/companies/:companyId/business-ops/offerings/:id", (_req, res) => res.status(405).json({ error: "Archive with PATCH status and expectedVersion" }));
 
   router.get("/companies/:companyId/business-ops/orders", async (req, res) => {
-    const companyId = requireCompanyId(req);
-    assertCompanyAccess(req, companyId);
-    const orders = await db.execute(sql`
-      SELECT * FROM business_ops_orders WHERE company_id = ${companyId} ORDER BY created_at DESC
-    `);
-    res.json({ orders });
+    res.json({ orders: await db.execute(sql`SELECT * FROM business_ops_orders WHERE company_id = ${company(req)} ORDER BY created_at DESC`) });
   });
-
   router.post("/companies/:companyId/business-ops/orders", async (req, res) => {
-    const companyId = requireCompanyId(req);
-    assertCompanyAccess(req, companyId);
-    const body = orderCreateSchema.parse(req.body);
-    const id = randomUUID();
-    const totalCents = totalCentsOf(body.items);
-    const [order] = await db.execute(sql`
-      INSERT INTO business_ops_orders
-        (id, company_id, customer_name, customer_email, items, total_cents, currency, status, notes)
-      VALUES
-        (${id}, ${companyId}, ${body.customerName}, ${body.customerEmail || null},
-         ${JSON.stringify(body.items)}::jsonb, ${totalCents}, ${body.currency}, ${body.status}, ${body.notes})
-      RETURNING *
-    `);
+    const b = orderCreateSchema.parse(req.body);
+    requireEvidence(b.status, b.evidenceReference);
+    const order = await mutate(req, "business_order.recorded", "business_order", async (tx) => {
+      for (const item of b.items) {
+        if (!item.offeringId) continue;
+        const [offering] = await tx.execute(sql`SELECT * FROM business_ops_offerings WHERE id = ${item.offeringId} AND company_id = ${company(req)} AND status = 'active' FOR SHARE`);
+        if (!offering || offering.currency !== b.currency || offering.price_cents !== item.unitPriceCents) {
+          throw badRequest("Catalog item must be active, belong to this company, and match the recorded currency and price");
+        }
+      }
+      const total = b.items.reduce((sum, item) => sum + item.quantity * item.unitPriceCents, 0);
+      const [row] = await tx.execute(sql`INSERT INTO business_ops_orders (id, company_id, customer_name, customer_email, items, total_cents, currency, status, notes, evidence_reference, external_reference, status_history)
+        VALUES (${randomUUID()}, ${company(req)}, ${b.customerName}, ${b.customerEmail || null}, ${JSON.stringify(b.items)}::jsonb, ${total}, ${b.currency}, ${b.status}, ${b.notes}, ${b.evidenceReference ?? null}, ${b.externalReference ?? null}, ${JSON.stringify([{ status: b.status, evidenceReference: b.evidenceReference ?? null, actorId: getActorInfo(req).actorId, recordedAt: new Date().toISOString(), version: 1 }])}::jsonb)
+        ON CONFLICT (company_id, external_reference) DO NOTHING RETURNING *`);
+      if (!row) throw conflict("External reference already recorded. Read the existing order before retrying.");
+      return row;
+    });
     res.status(201).json({ order });
   });
-
   router.patch("/companies/:companyId/business-ops/orders/:id", async (req, res) => {
-    const companyId = requireCompanyId(req);
-    assertCompanyAccess(req, companyId);
-    const body = orderUpdateSchema.parse(req.body);
-    const [current] = (await db.execute(sql`
-      SELECT * FROM business_ops_orders WHERE id = ${req.params.id} AND company_id = ${companyId}
-    `)) as Record<string, unknown>[];
-    if (!current) throw notFound("Order not found");
-    const items = body.items ?? (current.items as unknown as z.infer<typeof orderItemSchema>[]);
-    const merged = {
-      customerName: body.customerName ?? (current.customer_name as string),
-      customerEmail: body.customerEmail ?? (current.customer_email as string | null),
-      items,
-      totalCents: totalCentsOf(items),
-      status: body.status ?? (current.status as string),
-      notes: body.notes ?? (current.notes as string),
-    };
-    const [order] = await db.execute(sql`
-      UPDATE business_ops_orders
-      SET customer_name = ${merged.customerName}, customer_email = ${merged.customerEmail || null},
-          items = ${JSON.stringify(merged.items)}::jsonb, total_cents = ${merged.totalCents},
-          status = ${merged.status}, notes = ${merged.notes}, updated_at = now()
-      WHERE id = ${req.params.id} AND company_id = ${companyId}
-      RETURNING *
-    `);
+    const b = orderUpdateSchema.parse(req.body);
+    const order = await mutate(req, "business_order.status_recorded", "business_order", async (tx) => {
+      const c = await lockRecord(tx, "business_ops_orders", company(req), recordId(req));
+      checkVersion(c, b.expectedVersion);
+      const status = b.status ?? (c.status as OrderStatus);
+      if (status !== c.status && !transitions[c.status as OrderStatus].includes(status)) throw badRequest("Invalid order status transition");
+      // Every settlement/fulfilment/refund transition needs its own evidence.
+      requireEvidence(status, status !== c.status ? b.evidenceReference : b.evidenceReference ?? (c.evidence_reference as string | null));
+      const [row] = await tx.execute(sql`UPDATE business_ops_orders SET status = ${status}, evidence_reference = ${b.evidenceReference ?? c.evidence_reference},
+        status_history = ${JSON.stringify([
+          // Preserve the pre-hardening status and reference on the first edit.
+          ...((c.status_history as unknown[]).length ? c.status_history as unknown[] : [{ status: c.status, evidenceReference: c.evidence_reference, version: c.version, legacy: true }]),
+          { status, evidenceReference: b.evidenceReference ?? c.evidence_reference, actorId: getActorInfo(req).actorId, recordedAt: new Date().toISOString(), version: Number(c.version) + 1 },
+        ])}::jsonb,
+        version = version + 1, updated_at = now() WHERE id = ${c.id} AND company_id = ${company(req)} RETURNING *`);
+      return row!;
+    });
     res.json({ order });
   });
 
-  // ---- Documents (company knowledge base) ----
-
   router.get("/companies/:companyId/business-ops/documents", async (req, res) => {
-    const companyId = requireCompanyId(req);
-    assertCompanyAccess(req, companyId);
-    const category = typeof req.query.category === "string" ? req.query.category : undefined;
-    const documents = category
-      ? await db.execute(sql`
-          SELECT * FROM business_ops_documents
-          WHERE company_id = ${companyId} AND category = ${category}
-          ORDER BY updated_at DESC
-        `)
-      : await db.execute(sql`
-          SELECT * FROM business_ops_documents
-          WHERE company_id = ${companyId}
-          ORDER BY updated_at DESC
-        `);
+    const category = documentCreateSchema.shape.category.removeDefault().optional().parse(req.query.category);
+    const documents = await db.execute(sql`SELECT * FROM business_ops_documents WHERE company_id = ${company(req)} AND archived_at IS NULL
+      ${category ? sql`AND category = ${category}` : sql``} ORDER BY updated_at DESC`);
     res.json({ documents });
   });
-
   router.post("/companies/:companyId/business-ops/documents", async (req, res) => {
-    const companyId = requireCompanyId(req);
-    assertCompanyAccess(req, companyId);
-    const body = documentCreateSchema.parse(req.body);
-    const actor = getActorInfo(req);
-    const id = randomUUID();
-    const [document] = await db.execute(sql`
-      INSERT INTO business_ops_documents (id, company_id, category, title, content, tags, created_by)
-      VALUES (${id}, ${companyId}, ${body.category}, ${body.title}, ${body.content},
-              ${JSON.stringify(body.tags)}::jsonb, ${actor.actorId})
-      RETURNING *
-    `);
+    const b = documentCreateSchema.parse(req.body);
+    const document = await mutate(req, "business_document.created", "business_document", async (tx) => {
+      const [row] = await tx.execute(sql`INSERT INTO business_ops_documents (id, company_id, category, title, content, tags, created_by)
+        VALUES (${randomUUID()}, ${company(req)}, ${b.category}, ${b.title}, ${b.content}, ${JSON.stringify(b.tags)}::jsonb, ${getActorInfo(req).actorId}) RETURNING *`);
+      await preserveDocument(tx, row!, getActorInfo(req).actorId);
+      return row!;
+    });
     res.status(201).json({ document });
   });
-
   router.patch("/companies/:companyId/business-ops/documents/:id", async (req, res) => {
-    const companyId = requireCompanyId(req);
-    assertCompanyAccess(req, companyId);
-    const body = documentUpdateSchema.parse(req.body);
-    const [current] = (await db.execute(sql`
-      SELECT * FROM business_ops_documents WHERE id = ${req.params.id} AND company_id = ${companyId}
-    `)) as Record<string, unknown>[];
-    if (!current) throw notFound("Document not found");
-    const merged = {
-      category: body.category ?? (current.category as string),
-      title: body.title ?? (current.title as string),
-      content: body.content ?? (current.content as string),
-      tags: body.tags ?? (current.tags as string[]),
-    };
-    const [document] = await db.execute(sql`
-      UPDATE business_ops_documents
-      SET category = ${merged.category}, title = ${merged.title}, content = ${merged.content},
-          tags = ${JSON.stringify(merged.tags)}::jsonb, updated_at = now()
-      WHERE id = ${req.params.id} AND company_id = ${companyId}
-      RETURNING *
-    `);
+    const b = documentUpdateSchema.parse(req.body);
+    const document = await mutate(req, "business_document.updated", "business_document", async (tx) => {
+      const c = await lockRecord(tx, "business_ops_documents", company(req), recordId(req));
+      checkVersion(c, b.expectedVersion);
+      if (c.archived_at) throw conflict("Archived documents cannot be edited");
+      await preserveDocument(tx, c, getActorInfo(req).actorId);
+      const [row] = await tx.execute(sql`UPDATE business_ops_documents SET category = ${b.category ?? c.category}, title = ${b.title ?? c.title},
+        content = ${b.content ?? c.content}, tags = ${JSON.stringify(b.tags ?? c.tags)}::jsonb, version = version + 1, updated_at = now()
+        WHERE id = ${c.id} AND company_id = ${company(req)} RETURNING *`);
+      await preserveDocument(tx, row!, getActorInfo(req).actorId);
+      return row!;
+    });
     res.json({ document });
   });
-
-  router.delete("/companies/:companyId/business-ops/documents/:id", async (req, res) => {
-    const companyId = requireCompanyId(req);
-    assertCompanyAccess(req, companyId);
-    await db.execute(sql`
-      DELETE FROM business_ops_documents WHERE id = ${req.params.id} AND company_id = ${companyId}
-    `);
-    res.status(204).end();
-  });
-
-  // ---- Summary (dashboard tie-in: revenue, catalog size, doc count) ----
-
-  router.get("/companies/:companyId/business-ops/summary", async (req, res) => {
-    const companyId = requireCompanyId(req);
-    assertCompanyAccess(req, companyId);
-    const [[offerings], [orders], [documents], [revenue]] = await Promise.all([
-      db.execute(sql`SELECT count(*)::int AS n FROM business_ops_offerings WHERE company_id = ${companyId} AND status = 'active'`),
-      db.execute(sql`SELECT count(*)::int AS n FROM business_ops_orders WHERE company_id = ${companyId}`),
-      db.execute(sql`SELECT count(*)::int AS n FROM business_ops_documents WHERE company_id = ${companyId}`),
-      db.execute(sql`
-        SELECT coalesce(sum(total_cents), 0)::bigint AS cents
-        FROM business_ops_orders
-        WHERE company_id = ${companyId} AND status IN ('paid', 'fulfilled')
-      `),
-    ]);
-    res.json({
-      activeOfferings: (offerings as { n: number }).n,
-      totalOrders: (orders as { n: number }).n,
-      totalDocuments: (documents as { n: number }).n,
-      revenueCents: Number((revenue as { cents: string | number }).cents),
+  router.post("/companies/:companyId/business-ops/documents/:id/archive", async (req, res) => {
+    const b = archiveBusinessRecordSchema.parse(req.body);
+    const document = await mutate(req, "business_document.archived", "business_document", async (tx) => {
+      const c = await lockRecord(tx, "business_ops_documents", company(req), recordId(req));
+      checkVersion(c, b.expectedVersion);
+      await preserveDocument(tx, c, getActorInfo(req).actorId);
+      const [row] = await tx.execute(sql`UPDATE business_ops_documents SET archived_at = now(), version = version + 1, updated_at = now()
+        WHERE id = ${c.id} AND company_id = ${company(req)} RETURNING *`);
+      await preserveDocument(tx, row!, getActorInfo(req).actorId);
+      return row!;
     });
+    res.json({ document });
   });
-
+  router.delete("/companies/:companyId/business-ops/documents/:id", (_req, res) => res.status(405).json({ error: "Documents must be archived with their current version" }));
+  router.get("/companies/:companyId/business-ops/documents/:id/revisions", async (req, res) => {
+    res.json({ revisions: await db.execute(sql`SELECT * FROM business_ops_document_revisions WHERE company_id = ${company(req)} AND document_id = ${recordId(req)} ORDER BY version DESC`) });
+  });
+  router.get("/companies/:companyId/business-ops/summary", async (req, res) => {
+    const id = company(req);
+    const [counts] = await db.execute(sql`SELECT
+      (SELECT count(*)::int FROM business_ops_offerings WHERE company_id = ${id} AND status = 'active') AS "activeOfferings",
+      (SELECT count(*)::int FROM business_ops_orders WHERE company_id = ${id}) AS "totalOrders",
+      (SELECT count(*)::int FROM business_ops_documents WHERE company_id = ${id} AND archived_at IS NULL) AS "totalDocuments"`);
+    const recordedValueByCurrency = await db.execute(sql`SELECT currency, sum(total_cents)::text AS "totalCents" FROM business_ops_orders
+      WHERE company_id = ${id} AND status IN ('paid', 'fulfilled') GROUP BY currency ORDER BY currency`);
+    res.json({ ...counts, recordedValueByCurrency });
+  });
   return router;
 }

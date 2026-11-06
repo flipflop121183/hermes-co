@@ -34,6 +34,25 @@ rewrite, because the image is identical.
       (`.github/workflows/pr.yml`): Business Ops safety job
       (`pnpm --filter @paperclipai/db check:migrations`, permission + fresh-DB +
       prototype-upgrade tests) and `pnpm check:token-gates`.
+- [ ] **GATE** Clear the four checks that are red on `master` today
+      (observed on the merged first PR and again on PR #2, all on GitHub's
+      `ubuntu-26.04` hosted image). None is caused by the docs change; all
+      block a trustworthy green signal:
+      1. `review` (commitperclip): Dependency graph is disabled in repo
+         settings, and the inherited workflow needs the upstream
+         `COMMITPERCLIP_KEY` secret. Enable the setting and add the secret,
+         or trim the workflow for this fork.
+      2. `Verify Paperclip Runner (static checks)`:
+         `stage-runner-binary.test.mjs` copies `/bin/sleep`, which on
+         Ubuntu 25.10+ is a symlink into the uutils multicall binary and
+         exits 1 under a foreign name. Use the node executable as the
+         fixture (patch posted on PR #2).
+      3. `General tests (server 7/12)`:
+         `runner-bridge-tools.test.ts` hard-codes exit code 1 for a denied
+         redirect; dash (`/bin/sh` on Ubuntu) returns 2. Assert non-zero
+         (patch posted on PR #2).
+      4. `Verify serialized server suites (5/9)`: see the Business Ops
+         OpenAPI gate in section 5.
 - [ ] **GATE** Full hand-off check passes locally on the exact commit:
       ```sh
       pnpm -r typecheck
@@ -154,6 +173,15 @@ rewrite, because the image is identical.
       company **owner** browser session. Agent API keys and delegated MCP
       sessions get nothing. Confirm this matches your intended operating
       model before customer data lands in it.
+- [ ] **GATE** The 15 Business Ops operations under
+      `/api/companies/{companyId}/business-ops/...` are mounted in
+      `server/src/app.ts` but absent from the generated OpenAPI document in
+      `server/src/routes/openapi.ts`, and the route file is not registered in
+      `server/src/__tests__/openapi-routes.test.ts`. That is why serialized
+      suite 5/9 is red. Register the file, document every operation with
+      schemas from `packages/shared/src/validators/business-ops.ts`, and get
+      the suite green before any agent or external client is pointed at
+      these routes. Do not add the file to an exclusion list.
 - [ ] Run the review stack once from the exact prod image digest using
       `docker/docker-compose.business-ops-review.yml` (fresh project, fresh
       credentials, internal network, `PAPERCLIP_SECRETS_STRICT_MODE=true`)

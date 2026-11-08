@@ -1,3 +1,8 @@
+import {
+  offeringCreateSchema, offeringUpdateSchema, orderCreateSchema, orderUpdateSchema,
+  documentCreateSchema, documentUpdateSchema, archiveBusinessRecordSchema,
+  businessCurrencySchema,
+} from "@paperclipai/shared";
 import { updateFastResponseSchema } from "@paperclipai/shared";
 import { slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
@@ -1837,6 +1842,20 @@ function applyDocumentFixups(document: any): any {
               : authLevel === "authenticated"
                 ? { actor: "board_or_agent" }
                 : { actor: "public" };
+
+      // Business Ops deliberately has narrower authority than generic company
+      // endpoints. Only board sessions may mutate; an agent or board API key
+      // must never be advertised as a mutation credential. Local implicit
+      // access exists only in the explicit trusted development mode.
+      if (path.startsWith("/api/companies/{companyId}/business-ops/")) {
+        const mutation = !["get", "head", "options"].includes(method.toLowerCase());
+        operation.security = mutation
+          ? [securityRequirement(BOARD_SESSION_AUTH_SCHEME)]
+          : BOARD_SECURITY;
+        operation["x-paperclip-authorization"] = mutation
+          ? { actor: "board", ownerOrInstanceAdminSession: true }
+          : { actor: "board" };
+      }
 
       if (isVoiceSessionOperation(path)) {
         operation.security = [{[BOARD_SESSION_AUTH_SCHEME]: []}];
@@ -12290,3 +12309,81 @@ for (const [method, path, summary] of [
     404: r.notFound, 409: r.conflict, 422: r.unprocessable,
   },
 });
+
+// ─── Business Ops: mounted routes and strict request contracts ──────────────
+// Keep these inputs linked to the very same validators used by business-ops.ts.
+// These endpoints record business data; they do not implement payment capture.
+const businessOpsBasePath = "/api/companies/{companyId}/business-ops";
+const businessOpsRow = z.record(z.string(), z.unknown());
+type BusinessOpsOpenApiOperation = {
+  method: string;
+  path: string;
+  summary: string;
+  body?: z.ZodTypeAny;
+  query?: z.ZodTypeAny;
+  response?: z.ZodTypeAny;
+  created?: boolean;
+  retired?: boolean;
+};
+const businessOpsOperations: BusinessOpsOpenApiOperation[] = [
+  { method: "get", path: "/access", summary: "Read permitted Business Ops actions",
+    response: z.object({ canWrite: z.boolean() }) },
+  { method: "get", path: "/offerings", summary: "List non-archived company offerings",
+    query: z.object({ kind: z.enum(["product", "service"]).optional() }),
+    response: z.object({ offerings: z.array(businessOpsRow) }) },
+  { method: "post", path: "/offerings", summary: "Create a company offering (owner session)",
+    body: offeringCreateSchema, response: z.object({ offering: businessOpsRow }), created: true },
+  { method: "patch", path: "/offerings/{id}", summary: "Update or archive a versioned offering (owner session)",
+    body: offeringUpdateSchema, response: z.object({ offering: businessOpsRow }) },
+  { method: "delete", path: "/offerings/{id}", summary: "Retired destructive endpoint; archive with PATCH", retired: true },
+  { method: "get", path: "/orders", summary: "List manual order records",
+    response: z.object({ orders: z.array(businessOpsRow) }) },
+  { method: "post", path: "/orders", summary: "Record a manual order; does not collect payment",
+    body: orderCreateSchema, response: z.object({ order: businessOpsRow }), created: true },
+  { method: "patch", path: "/orders/{id}", summary: "Record an evidenced order status transition",
+    body: orderUpdateSchema, response: z.object({ order: businessOpsRow }) },
+  { method: "get", path: "/documents", summary: "List active company documents",
+    query: z.object({ category: documentCreateSchema.shape.category.removeDefault().optional() }),
+    response: z.object({ documents: z.array(businessOpsRow) }) },
+  { method: "post", path: "/documents", summary: "Create a company document (owner session)",
+    body: documentCreateSchema, response: z.object({ document: businessOpsRow }), created: true },
+  { method: "patch", path: "/documents/{id}", summary: "Update a versioned document (owner session)",
+    body: documentUpdateSchema, response: z.object({ document: businessOpsRow }) },
+  { method: "post", path: "/documents/{id}/archive", summary: "Archive a versioned document (owner session)",
+    body: archiveBusinessRecordSchema, response: z.object({ document: businessOpsRow }) },
+  { method: "delete", path: "/documents/{id}", summary: "Retired destructive endpoint; archive with POST", retired: true },
+  { method: "get", path: "/documents/{id}/revisions", summary: "Read historical document versions",
+    response: z.object({ revisions: z.array(businessOpsRow) }) },
+  { method: "get", path: "/summary", summary: "Read recorded order value by currency (not accounting revenue)",
+    response: z.object({
+      activeOfferings: z.number().int(),
+      totalOrders: z.number().int(),
+      totalDocuments: z.number().int(),
+      recordedValueByCurrency: z.array(z.object({
+        currency: businessCurrencySchema,
+        totalCents: z.string(),
+      })),
+    }) },
+];
+for (const operation of businessOpsOperations) {
+  registerCurrentRoute({
+    method: operation.method,
+    path: businessOpsBasePath + operation.path,
+    tags: ["business-ops"],
+    summary: operation.summary,
+    ...(operation.body ? { body: operation.body } : {}),
+    ...(operation.query ? { query: operation.query } : {}),
+    responses: {
+      [operation.retired ? 405 : operation.created ? 201 : 200]: operation.retired
+        ? { description: "Method not allowed: this record must be archived",
+            content: { "application/json": { schema: z.object({ error: z.string() }) } } }
+        : r.ok(operation.response),
+      400: r.badRequest,
+      401: r.unauthorized,
+      403: r.forbidden,
+      404: r.notFound,
+      409: r.conflict,
+      422: r.unprocessable,
+    },
+  });
+}

@@ -102,9 +102,13 @@ Business Ops routes.
 - Previous digest: record it in `docker/alpha/.env` as a comment before every
   change to `HERMES_ALPHA_IMAGE`.
 - App rollback: set `HERMES_ALPHA_IMAGE` back and `docker compose up -d server`.
-- Schema rollback: migrations are forward-only. Restore the newest file under
-  `/paperclip/backups` into a fresh database and start the previous digest
-  against it. Never run an older image against a newer schema.
+- Schema rollback: migrations are forward-only. Before any user writes, a
+  tested pre-cutover backup may be restored into a **separate** fresh database
+  and matched with the prior digest after schema compatibility review. Once
+  new writes exist, stop writers, preserve and back up the **current** database,
+  reconcile/replay changes and obtain a reviewed recovery decision before any
+  rollback; never blindly overwrite them with an older snapshot. Never run
+  an old image against a schema it has not been tested to understand.
 - Triggers: health red for more than 5 minutes, auth loop or lockout, any 5xx
   on `/api/health`, migration failure at boot, Business Ops routes returning
   500.

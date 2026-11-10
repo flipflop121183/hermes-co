@@ -1,0 +1,139 @@
+# Alpha deployment: one VM, Docker Compose, Postgres 17, Caddy for TLS.
+#
+# This is the "Option A" shape from doc/plans/2026-11-06-live-deployment-checklist.md
+# tightened for an internet-facing alpha: authenticated + public mode, TLS at
+# the edge, database on an internal-only network, migrations applied at boot,
+# hourly logical backups on the persistent volume, strict secrets mode.
+#
+#   cp docker/alpha/.env.example docker/alpha/.env   # fill every value
+#   docker compose --env-file docker/alpha/.env -f docker/docker-compose.alpha.yml pull
+#   docker compose --env-file docker/alpha/.env -f docker/docker-compose.alpha.yml up -d
+#   docker compose --env-file docker/alpha/.env -f docker/docker-compose.alpha.yml exec server \
+#     node cli/dist/index.js auth bootstrap-ceo
+#
+# Full sequence, gates, and rollback: doc/plans/2026-11-10-alpha-deploy.md
+name: ${HERMES_ALPHA_PROJECT:-hermes-alpha}
+
+services:
+  db:
+    image: ${HERMES_ALPHA_POSTGRES_IMAGE:-postgres:17-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hermes
+      POSTGRES_PASSWORD: ${HERMES_ALPHA_DB_PASSWORD:?Set HERMES_ALPHA_DB_PASSWORD (openssl rand -hex 24)}
+      POSTGRES_DB: hermes
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - alpha-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hermes -d hermes"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    # No `ports:` on purpose. Postgres is reachable only from `server` on the
+    # internal network. The default docker-compose.yml publishes 5432; this
+    # file must never.
+    networks: [internal]
+
+  server:
+    # Deploy an immutable digest, never a mutable tag (doc/DOCKER.md).
+    # Example: ghcr.io/flipflop121183/hermes-co@sha256:<digest>
+    image: ${HERMES_ALPHA_IMAGE:?Set HERMES_ALPHA_IMAGE to an immutable ghcr digest}
+    restart: unless-stopped
+    # tini is PID 1 inside the image; pids_limit is the backstop if a run
+    # leaks processes (see docker/docker-compose.yml for the reasoning).
+    pids_limit: 2048
+    environment:
+      DATABASE_URL: postgres://hermes:${HERMES_ALPHA_DB_PASSWORD}@db:5432/hermes
+      HOST: "0.0.0.0"
+      PORT: "3100"
+      SERVE_UI: "true"
+      PAPERCLIP_HOME: /paperclip
+
+      # Internet-facing: login required, browser first-admin claim disabled,
+      # Better Auth rate limiting on, doctor fails hard on misconfiguration.
+      PAPERCLIP_DEPLOYMENT_MODE: authenticated
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: public
+      PAPERCLIP_PUBLIC_URL: https://${HERMES_ALPHA_DOMAIN:?Set HERMES_ALPHA_DOMAIN (the public hostname)}
+      # Caddy is the only hop in front of the server, so trust exactly one
+      # proxy for X-Forwarded-* (server/src/middleware/trust-proxy.ts).
+      TRUST_PROXY: "1"
+
+      BETTER_AUTH_SECRET: ${HERMES_ALPHA_AUTH_SECRET:?Set HERMES_ALPHA_AUTH_SECRET (openssl rand -hex 32)}
+      PAPERCLIP_TOOL_ACTION_SIGNING_SECRET: ${HERMES_ALPHA_TOOL_SIGNING_SECRET:?Set HERMES_ALPHA_TOOL_SIGNING_SECRET (openssl rand -hex 32)}
+
+      # Single replica: let the server apply pending migrations at boot.
+      # If you ever run two server replicas, switch to
+      # PAPERCLIP_MIGRATION_PROMPT=never and run `pnpm db:migrate` as a
+      # separate deploy step (server/src/index.ts refuses a stale schema).
+      PAPERCLIP_MIGRATION_AUTO_APPLY: "true"
+
+      # Nobody pastes API keys into inline agent env on a shared instance.
+      PAPERCLIP_SECRETS_STRICT_MODE: "true"
+      # Flip to "true" and `up -d` again right after the first admin exists.
+      PAPERCLIP_AUTH_DISABLE_SIGN_UP: ${HERMES_ALPHA_DISABLE_SIGN_UP:-false}
+
+      # Hourly logical backups kept 7 days on the persistent volume.
+      # pg_dump is used when present in the image, otherwise the JavaScript
+      # engine (packages/db/src/backup-lib.ts, backupEngine "auto").
+      PAPERCLIP_DB_BACKUP_ENABLED: "true"
+      PAPERCLIP_DB_BACKUP_DIR: /paperclip/backups
+      PAPERCLIP_DB_BACKUP_INTERVAL_MINUTES: "60"
+      PAPERCLIP_DB_BACKUP_RETENTION_DAYS: "7"
+
+      # Exactly one server process runs the heartbeat scheduler.
+      HEARTBEAT_SCHEDULER_ENABLED: "true"
+
+      # Provider keys. Prefer Apps -> Connections in the UI after go-live;
+      # these env values are the alpha shortcut and may be left empty.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    volumes:
+      # Uploads, workspaces, backups, and the secrets master key all live here.
+      # Back this volume up separately from the database (doc/DATABASE.md).
+      - alpha-app:/paperclip
+    healthcheck:
+      # The production image is node:24 slim with no curl; use node itself.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    depends_on:
+      db:
+        condition: service_healthy
+    # `internal` reaches Postgres; `edge` reaches Caddy and the internet
+    # (provider APIs, GitHub, the Hermes gateway).
+    networks: [internal, edge]
+
+  caddy:
+    image: ${HERMES_ALPHA_CADDY_IMAGE:-caddy:2-alpine}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      HERMES_ALPHA_DOMAIN: ${HERMES_ALPHA_DOMAIN}
+      HERMES_ALPHA_ACME_EMAIL: ${HERMES_ALPHA_ACME_EMAIL:?Set HERMES_ALPHA_ACME_EMAIL for Let's Encrypt notices}
+    volumes:
+      - ./alpha/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - server
+    networks: [edge]
+
+networks:
+  # Postgres only. No route to the host network or the internet.
+  internal:
+    internal: true
+  edge: {}
+
+volumes:
+  alpha-db:
+  alpha-app:
+  caddy-data:
+  caddy-config:

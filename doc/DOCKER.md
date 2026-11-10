@@ -135,6 +135,18 @@ BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
 
 PostgreSQL data persists in a named Docker volume (`pgdata`). Paperclip data persists in `paperclip-data`.
 
+### Internet-facing alpha (Compose + Caddy)
+
+One VM, Postgres on an internal-only network, the server from an immutable
+digest in `authenticated` + `public` mode, Caddy for TLS. Every required
+variable is listed in `docker/alpha/.env.example`; the go-live sequence and
+rollback are in `doc/plans/2026-11-10-alpha-deploy.md`.
+
+```sh
+cp docker/alpha/.env.example docker/alpha/.env   # fill every value, chmod 600
+docker compose --env-file docker/alpha/.env -f docker/docker-compose.alpha.yml up -d
+```
+
 ### Untrusted PR review
 
 Isolated container for reviewing untrusted pull requests with Codex or Claude, without exposing your host machine. See `doc/UNTRUSTED-PR-REVIEW.md` for the full workflow.

@@ -9,7 +9,16 @@ records what was verified on 2026-11-10.
 
 ## Go / no-go, as of 2026-11-10
 
-**Go for an alpha behind a login, with two code gates merged first.**
+**Engineering GO / public deployment NO-GO pending acceptance.** The owner chose
+`hermes-co` as the candidate application source on 2026-11-10; that authorizes
+reviewable hardening, not DNS/VPS/production/customer-access changes.
+
+Before any public exposure: merge approved PRs in order after green required
+checks; use a newly verified image digest; reconcile live Hermes and staged
+Paperclip runtimes read-only; validate fresh storage, cross-company/agent
+authorization, profile-to-gateway mapping, spend and kill-switch controls, and
+a backup/restore drill. Keep the scheduler disabled in alpha by default.
+Request a separate owner go/no-go decision for actual deployment.
 
 What is already true on `master` (`5d4e0e0`):
 
@@ -28,9 +37,7 @@ Merge order that yields a green `master`:
 1. PR #3 (Business Ops OpenAPI contract).
 2. This PR (two test fixes plus the alpha kit).
 
-After both merge, `.github/workflows/docker.yml` publishes a new
-`sha-<short>` tag. Deploy that digest, not the one above, so the alpha runs
-code with a green signal.
+After both merge, verify the workflow, resolve the new release's **immutable digest**, and put it in the local `.env`. The example leaves the image blank to prevent deploying the older master image by mistake. Do not use a mutable tag.
 
 ## What this PR adds
 
@@ -83,9 +90,10 @@ docker compose up -d server
 docker compose exec server node cli/dist/index.js doctor
 ```
 
-Then, in the UI: create the alpha company, confirm owner membership, connect
-provider credentials under Apps -> Connections, join and approve one Hermes
-gateway agent, run one trivial task, and create one Business Ops offering,
+Only after a separately approved deployment and isolation check, create an alpha
+company, confirm owner membership, connect provider credentials under Apps ->
+Connections, join and approve one isolated Hermes gateway profile, run one
+explicit *manual* synthetic task (no scheduler), and create one Business Ops offering,
 order, and document as an owner. Confirm an agent API key gets 403 on the
 Business Ops routes.
 

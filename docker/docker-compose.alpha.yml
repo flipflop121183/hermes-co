@@ -81,8 +81,10 @@ services:
       PAPERCLIP_DB_BACKUP_INTERVAL_MINUTES: "60"
       PAPERCLIP_DB_BACKUP_RETENTION_DAYS: "7"
 
-      # Exactly one server process runs the heartbeat scheduler.
-      HEARTBEAT_SCHEDULER_ENABLED: "true"
+      # Isolation gate: alpha must never dispatch the existing hosted bots.
+      # Enable scheduling only after profile ownership, budgets, model grants,
+      # approval routes, and exactly-one-dispatcher tests pass separately.
+      HEARTBEAT_SCHEDULER_ENABLED: "false"
 
       # Provider keys. Prefer Apps -> Connections in the UI after go-live;
       # these env values are the alpha shortcut and may be left empty.

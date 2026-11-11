@@ -32,22 +32,31 @@ async function withOwnedChildren(root, action) {
   }
 }
 
+// The fixture must be a standalone executable. On Ubuntu 25.10+ /bin/sleep is a
+// symlink into the uutils multicall coreutils binary; copied and invoked under a
+// different name it exits 1 instead of sleeping. The node executable is always
+// present, standalone, and honours an inline script, so it stands in for the
+// long-running runner process.
+const FIXTURE = process.execPath;
+const holdArgs = ["-e", "setTimeout(() => {}, 30_000)"];
+const exitArgs = ["-e", ""];
+
 test("atomically publishes while the previous executable is running", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), "runnerd-stage-test-"));
   const destination = path.join(root, "paperclip-runnerd");
   await withOwnedChildren(root, async start => {
-    await stageRunnerBinary("/bin/sleep", destination);
+    await stageRunnerBinary(FIXTURE, destination);
     const previous = await stat(destination);
-    const old = start(destination, ["30"]);
+    const old = start(destination, holdArgs);
     await old.spawned;
-    await stageRunnerBinary("/bin/sleep", destination);
+    await stageRunnerBinary(FIXTURE, destination);
     const published = await stat(destination);
     assert.notEqual(published.ino, previous.ino);
     assert.equal(published.mode & 0o777, 0o755);
     assert.equal(old.child.exitCode, null);
     assert.equal(old.child.signalCode, null);
     assert.deepEqual(await readdir(root), ["paperclip-runnerd"]);
-    const next = start(destination, ["0"]);
+    const next = start(destination, exitArgs);
     await next.spawned; await next.closed;
     assert.equal(next.child.exitCode, 0);
   });
@@ -57,7 +66,7 @@ test("a second spawn error still retires the live old child and removes its fixt
   const root = await mkdtemp(path.join(tmpdir(), "runnerd-stage-spawn-failure-"));
   let old;
   await assert.rejects(withOwnedChildren(root, async start => {
-    old = start("/bin/sleep", ["30"]); await old.spawned;
+    old = start(FIXTURE, holdArgs); await old.spawned;
     const failed = start(path.join(root, "missing-executable"), []);
     await failed.spawned;
   }), { code: "ENOENT" });

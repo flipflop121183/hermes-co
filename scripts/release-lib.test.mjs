@@ -406,3 +406,70 @@ test("every publish job budgets for build time and four delayed packages", () =>
     assert.ok(timeoutMinutes * 60 > requiredSeconds, `${job} must leave time beyond build and polling`);
   }
 });
+
+// The fork inherits upstream release tags and package names. Do not let a
+// successful dependency, a schedule, or a manual dispatch authorize publication.
+function releaseJobConditions() {
+  return [...releaseWorkflow.split("\njobs:\n")[1].matchAll(/^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/gm)]
+    .map(([, name, body]) => {
+      const match = body.match(/^    if: (.+)(?:\n|$)/m);
+      assert.ok(match, `${name} must have an explicit repository gate`);
+      const condition = match[1] === ">-"
+        ? body.slice(match.index + match[0].length).match(/^(?:      [^\n]*\n)+/)[0].trim().replace(/\n\s*/g, " ")
+        : match[1];
+      return [name, condition];
+    });
+}
+
+function evaluateReleaseCondition(condition, { repository, event = "schedule", channel = "nightly", dryRun = false, cancelled = false } = {}) {
+  const dependencies = Object.fromEntries(releaseJobConditions().map(([name]) => [name, {
+    result: "success",
+    outputs: { proceed: "true", packages: "true", image: "true", mode: "candidate", notes_mode: "master_beta" },
+  }]));
+  // These static expressions use the JS-compatible subset of GitHub's expression
+  // language. This evaluates our repository file only, never external input.
+  return Function("github", "inputs", "needs", "cancelled", "always", `return (${condition});`)(
+    { repository, event_name: event, ref: "refs/heads/master" },
+    { channel, dry_run: dryRun }, dependencies, () => cancelled, () => true,
+  );
+}
+
+test("all upstream release jobs are explicitly restricted to the upstream repository", () => {
+  const jobs = releaseJobConditions();
+  assert.equal(jobs.length, 22, "update coverage when release jobs change");
+  for (const [name, condition] of jobs) {
+    assert.ok(condition.startsWith("github.repository == 'paperclipai/paperclip' &&"), name);
+  }
+});
+
+test("fork release jobs cannot run for schedules, pushes, or any manual channel", () => {
+  for (const repository of ["flipflop121183/hermes-co", "example/fork", "paperclipai/other"]) {
+    for (const event of ["schedule", "push", "workflow_dispatch"]) {
+      for (const channel of ["nightly", "stable", "beta", "preview", "cloud-migrator"]) {
+        for (const dryRun of [false, true]) {
+          for (const [name, condition] of releaseJobConditions()) {
+            assert.equal(evaluateReleaseCondition(condition, { repository, event, channel, dryRun }), false,
+              `${repository}: ${name} must skip ${event}/${channel}/dry-run=${dryRun}`);
+          }
+        }
+      }
+    }
+  }
+});
+
+test("upstream nightly selection retains its event gates", () => {
+  const condition = Object.fromEntries(releaseJobConditions()).select_nightly;
+  const repository = "paperclipai/paperclip";
+  assert.equal(evaluateReleaseCondition(condition, { repository }), true);
+  assert.equal(evaluateReleaseCondition(condition, { repository, event: "workflow_dispatch" }), true);
+  assert.equal(evaluateReleaseCondition(condition, { repository, event: "push" }), false);
+  assert.equal(evaluateReleaseCondition(condition, { repository, event: "workflow_dispatch", channel: "stable" }), false);
+});
+
+test("upstream publish cancellation still blocks nightly and beta jobs", () => {
+  const jobs = Object.fromEntries(releaseJobConditions());
+  for (const name of ["publish_nightly", "publish_beta"]) {
+    assert.equal(evaluateReleaseCondition(jobs[name], { repository: "paperclipai/paperclip" }), true);
+    assert.equal(evaluateReleaseCondition(jobs[name], { repository: "paperclipai/paperclip", cancelled: true }), false);
+  }
+});

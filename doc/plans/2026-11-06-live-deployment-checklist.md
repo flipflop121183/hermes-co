@@ -149,7 +149,7 @@ rewrite, because the image is identical.
 - [ ] **GATE** First admin on a public instance must use the CLI invite, not
       the browser claim:
       ```sh
-      docker exec -it <container> node cli/dist/index.js auth bootstrap-ceo
+      docker exec -it <container> node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts auth bootstrap-ceo
       ```
       (or `pnpm paperclipai auth bootstrap-ceo` from a source checkout
       pointed at the prod DB). Accept the one-time invite URL immediately.
@@ -228,7 +228,7 @@ rewrite, because the image is identical.
       via `/proc/<pid>/exe`, not an interactive shell.
 - [ ] Run doctor against the production config and get a green summary:
       ```sh
-      docker exec -it <container> node cli/dist/index.js doctor
+      docker exec -it <container> node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts doctor
       ```
 - [ ] Time sync (NTP) on the host. Auth tokens and signed tool actions are
       time-sensitive.

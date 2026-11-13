@@ -110,6 +110,37 @@ services:
         condition: service_healthy
     networks: [internal, edge]
 
+  # One-shot first-admin bootstrap. Hostinger's Docker Manager has no exec,
+  # so this service runs `auth bootstrap-ceo` once the server is healthy and
+  # prints the one-time invite URL to its own logs (hPanel -> Docker Manager
+  # -> Logs, or the VPS API `vps_docker_logs`). Accept the URL immediately.
+  # It exits afterwards and is idempotent: on later `up`s it only logs that an
+  # admin already exists. Remove it from the project once sign-up is closed.
+  bootstrap:
+    image: ${HERMES_ALPHA_IMAGE}
+    restart: "no"
+    environment:
+      DATABASE_URL: postgres://hermes:${HERMES_ALPHA_DB_PASSWORD}@db:5432/hermes
+      PAPERCLIP_HOME: /paperclip
+      PAPERCLIP_PUBLIC_URL: https://${HERMES_ALPHA_DOMAIN}
+      HERMES_ALPHA_DOMAIN: ${HERMES_ALPHA_DOMAIN}
+    # The production image builds ui and server only, so the CLI runs from
+    # source through the tsx loader the image ships for the server. The CLI
+    # also insists on a config file; a minimal authenticated/postgres config
+    # is written to this container's /tmp (the server volume is untouched)
+    # and the database comes from DATABASE_URL. `$$` is a literal `$` for
+    # the shell after Compose interpolation.
+    command:
+      - sh
+      - -c
+      - |
+        printf '%s' '{"$$meta":{"version":1,"updatedAt":"2026-01-01T00:00:00.000Z","source":"configure"},"logging":{"mode":"file"},"server":{"deploymentMode":"authenticated","deploymentExposure":"public"},"database":{"mode":"postgres"},"auth":{"baseUrlMode":"explicit","publicBaseUrl":"https://'"$$HERMES_ALPHA_DOMAIN"'"}}' > /tmp/bootstrap-config.json
+        exec node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts auth bootstrap-ceo --config /tmp/bootstrap-config.json --base-url "https://$$HERMES_ALPHA_DOMAIN"
+    depends_on:
+      server:
+        condition: service_healthy
+    networks: [internal]
+
 networks:
   internal:
     internal: true

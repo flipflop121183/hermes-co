@@ -42,3 +42,46 @@ jobs:
           server/src/routes/business-ops-access.test.ts
           server/src/routes/business-ops.test.ts
       - run: pnpm check:token-gates
+
+  alpha_config:
+    name: Alpha Compose / Caddy preflight (synthetic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Validate alpha Compose and fail-closed defaults
+        env:
+          HERMES_ALPHA_IMAGE: ghcr.io/flipflop121183/hermes-co@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          HERMES_ALPHA_DOMAIN: alpha.example.test
+          HERMES_ALPHA_ACME_EMAIL: ops@example.test
+          HERMES_ALPHA_DB_PASSWORD: synthetic-db-password-not-secret
+          HERMES_ALPHA_AUTH_SECRET: synthetic-auth-secret-not-secret
+          HERMES_ALPHA_TOOL_SIGNING_SECRET: synthetic-tool-secret-not-secret
+        run: |
+          docker compose -f docker/docker-compose.alpha.yml config --quiet
+          docker compose -f docker/docker-compose.alpha.yml config --format json > /tmp/hermes-alpha-compose.json
+          node --input-type=commonjs <<'NODE'
+          const assert = require("node:assert/strict");
+          const fs = require("node:fs");
+          const stack = JSON.parse(fs.readFileSync("/tmp/hermes-alpha-compose.json", "utf8"));
+          assert.equal(stack.services.server.environment.HEARTBEAT_SCHEDULER_ENABLED, "false",
+            "A disposable alpha must not dispatch agents automatically");
+          assert.equal(stack.services.server.ports, undefined, "App port must not be published");
+          assert.equal(stack.services.db.ports, undefined, "Database must never be published");
+          assert.match(stack.services.server.image, /@sha256:[a-f0-9]{64}$/,
+            "App image must use an immutable digest");
+          assert.equal(stack.services.server.environment.PAPERCLIP_SECRETS_STRICT_MODE, "true");
+          assert.equal(stack.services.server.environment.PAPERCLIP_DEPLOYMENT_MODE, "authenticated");
+          NODE
+      - name: Validate Caddyfile without credentials or network access
+        run: |
+          docker run --rm --network none --read-only \
+            --tmpfs /tmp --tmpfs /data --tmpfs /config \
+            -e HERMES_ALPHA_DOMAIN=alpha.example.test \
+            -e HERMES_ALPHA_ACME_EMAIL=ops@example.test \
+            -v "$PWD/docker/alpha/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2.10.2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile

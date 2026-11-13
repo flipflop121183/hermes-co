@@ -1,0 +1,41 @@
+# Edge for the alpha deployment (docker/docker-compose.alpha.yml).
+#
+# Caddy terminates TLS (Let's Encrypt for a public hostname, its internal CA
+# for a bare IP, which browsers will warn about) and forwards Host,
+# X-Forwarded-For, X-Forwarded-Proto to the server. The server trusts exactly
+# one hop (TRUST_PROXY=1 in the compose file).
+{
+	email {$HERMES_ALPHA_ACME_EMAIL}
+}
+
+{$HERMES_ALPHA_DOMAIN} {
+	encode zstd gzip
+
+	# Uploads and artifact attachments.
+	request_body {
+		max_size 100MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	reverse_proxy server:3100 {
+		# Server-sent events and long-running run streams: do not buffer, and
+		# do not cut a response that is still being written.
+		flush_interval -1
+		transport http {
+			read_timeout 0
+			write_timeout 0
+			dial_timeout 10s
+		}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

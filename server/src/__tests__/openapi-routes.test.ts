@@ -30,6 +30,7 @@ const apiPrefixes: Record<string, string> = {
   "approvals.ts": "/api",
   "assets.ts": "/api",
   "auth.ts": "/api/auth",
+  "business-ops.ts": "/api",
   "board-chat.ts": "/api",
   "browser-use.ts": "/api",
   "built-in-agents.ts": "/api",
@@ -1181,5 +1182,78 @@ describe("heartbeat run ID OpenAPI contract", () => {
       }
     }
     expect(checked).toBe(12);
+  });
+});
+
+describe("Business Ops OpenAPI coverage and authorization", () => {
+  const base = "/api/companies/{companyId}/business-ops";
+  const endpoints = [
+    ["get", "/access"],
+    ["get", "/offerings"],
+    ["post", "/offerings"],
+    ["patch", "/offerings/{id}"],
+    ["delete", "/offerings/{id}"],
+    ["get", "/orders"],
+    ["post", "/orders"],
+    ["patch", "/orders/{id}"],
+    ["get", "/documents"],
+    ["post", "/documents"],
+    ["patch", "/documents/{id}"],
+    ["post", "/documents/{id}/archive"],
+    ["delete", "/documents/{id}"],
+    ["get", "/documents/{id}/revisions"],
+    ["get", "/summary"],
+  ] as const;
+
+  it("documents every mounted Business Ops operation without shadow exclusions", () => {
+    const { routes } = loadActualRoutes();
+    const { spec } = loadSpecRoutes();
+    const documentOperations = Object.entries(spec.paths as Record<string, Record<string, unknown>>)
+      .flatMap(([path, methods]) => path.startsWith(base)
+        ? Object.keys(methods).map((method) => `${method.toUpperCase()} ${path}`)
+        : []);
+    const expected = endpoints.map(([method, path]) => `${method.toUpperCase()} ${base}${path}`);
+    expect(documentOperations.sort()).toEqual(expected.sort());
+    for (const operation of expected) expect(routes.has(operation)).toBe(true);
+  });
+
+  it("does not claim that agents or board API keys can mutate business records", () => {
+    const { spec } = loadSpecRoutes();
+    for (const [method, path] of endpoints) {
+      const operation = spec.paths[base + path][method];
+      expect(operation).toBeDefined();
+      expect(operation["x-paperclip-authorization"]).toEqual(
+        method === "get"
+          ? { actor: "board" }
+          : { actor: "board", ownerOrInstanceAdminSession: true },
+      );
+      expect(operation.security).toEqual(
+        method === "get"
+          ? [{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]
+          : [{ BoardSessionAuth: [] }],
+      );
+      expect(operation.responses["403"]).toBeDefined();
+      expect(operation.responses["404"]).toBeDefined();
+    }
+  });
+
+  it("reuses the validated business mutation bodies and documents retirement", () => {
+    const { spec } = loadSpecRoutes();
+    const price = spec.paths[base + "/offerings"].post.requestBody.content["application/json"].schema;
+    expect(price.properties.priceCents).toBeDefined();
+    const update = spec.paths[base + "/offerings/{id}"].patch.requestBody.content["application/json"].schema;
+    expect(update.required).toContain("expectedVersion");
+    const status = spec.paths[base + "/orders/{id}"].patch.requestBody.content["application/json"].schema;
+    expect(status.required).toContain("expectedVersion");
+    const archive = spec.paths[base + "/documents/{id}/archive"].post.requestBody.content["application/json"].schema;
+    expect(archive.required).toContain("expectedVersion");
+    for (const path of ["/offerings/{id}", "/documents/{id}"]) {
+      const deletion = spec.paths[base + path].delete;
+      expect(deletion.responses["405"]).toBeDefined();
+      expect(deletion.responses["200"]).toBeUndefined();
+    }
+    const summary = spec.paths[base + "/summary"].get.responses["200"].content["application/json"].schema;
+    expect(summary.properties.recordedValueByCurrency).toBeDefined();
+    expect(summary.properties).not.toHaveProperty("revenueUsdCents");
   });
 });

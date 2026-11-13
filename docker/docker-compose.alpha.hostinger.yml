@@ -110,6 +110,27 @@ services:
         condition: service_healthy
     networks: [internal, edge]
 
+  # One-shot first-admin bootstrap. Hostinger's Docker Manager has no exec,
+  # so this service runs `auth bootstrap-ceo` once the server is healthy and
+  # prints the one-time invite URL to its own logs (hPanel -> Docker Manager
+  # -> Logs, or the VPS API `vps_docker_logs`). Accept the URL immediately.
+  # It exits afterwards and is idempotent: on later `up`s it only logs that an
+  # admin already exists. Remove it from the project once sign-up is closed.
+  bootstrap:
+    image: ${HERMES_ALPHA_IMAGE}
+    restart: "no"
+    environment:
+      DATABASE_URL: postgres://hermes:${HERMES_ALPHA_DB_PASSWORD}@db:5432/hermes
+      PAPERCLIP_HOME: /paperclip
+      PAPERCLIP_DEPLOYMENT_MODE: authenticated
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: public
+      PAPERCLIP_PUBLIC_URL: https://${HERMES_ALPHA_DOMAIN}
+    command: ["node", "cli/dist/index.js", "auth", "bootstrap-ceo", "--base-url", "https://${HERMES_ALPHA_DOMAIN}"]
+    depends_on:
+      server:
+        condition: service_healthy
+    networks: [internal]
+
 networks:
   internal:
     internal: true

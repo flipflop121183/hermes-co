@@ -116,9 +116,13 @@ its `.env`, so the Caddyfile bind mount is unavailable. Use
 3. Traefik picks up the `hermes-alpha` router from labels; no Traefik change
    is needed. The `traefik.docker.network` label pins it to the project's
    `edge` network.
-4. Continue at "First admin" above using
-   `docker compose -p hermes-alpha exec server node cli/dist/index.js auth bootstrap-ceo`
-   from an SSH session, or the Docker Manager's container terminal.
+4. First admin without SSH: the file includes a one-shot `bootstrap` service
+   that runs `auth bootstrap-ceo --base-url https://<domain>` once the server
+   is healthy and prints the one-time invite URL to its own logs. Read it from
+   hPanel -> Docker Manager -> Logs (or the VPS API `vps_docker_logs`), accept
+   it at once, then set `HERMES_ALPHA_DISABLE_SIGN_UP=true` and update the
+   project. The service is idempotent and logs "already has an admin" on later
+   restarts; remove it from the project after sign-up is closed.
 
 Verified on 2026-11-13: `docker compose config` parses the file, and the same
 fail-closed assertions as the CI preflight pass against it (scheduler off, no

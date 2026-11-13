@@ -78,7 +78,7 @@ First admin. Browser claim is disabled in `public` mode by design; use the
 invite path:
 
 ```sh
-docker compose exec server node cli/dist/index.js auth bootstrap-ceo
+docker compose exec server node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts auth bootstrap-ceo
 # open the one-time invite URL immediately, set the password, sign in
 ```
 
@@ -87,7 +87,7 @@ Then close sign-up and restart the server service:
 ```sh
 sed -i 's/^HERMES_ALPHA_DISABLE_SIGN_UP=.*/HERMES_ALPHA_DISABLE_SIGN_UP=true/' docker/alpha/.env
 docker compose up -d server
-docker compose exec server node cli/dist/index.js doctor
+docker compose exec server node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts doctor
 ```
 
 Only after a separately approved deployment and isolation check, create an alpha
@@ -117,7 +117,8 @@ its `.env`, so the Caddyfile bind mount is unavailable. Use
    is needed. The `traefik.docker.network` label pins it to the project's
    `edge` network.
 4. First admin without SSH: the file includes a one-shot `bootstrap` service
-   that runs `auth bootstrap-ceo --base-url https://<domain>` once the server
+   that runs `auth bootstrap-ceo --base-url https://<domain>` from the CLI
+   source via the image's tsx loader (the image ships no `cli/dist`) once the server
    is healthy and prints the one-time invite URL to its own logs. Read it from
    hPanel -> Docker Manager -> Logs (or the VPS API `vps_docker_logs`), accept
    it at once, then set `HERMES_ALPHA_DISABLE_SIGN_UP=true` and update the

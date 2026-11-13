@@ -122,12 +122,20 @@ services:
     environment:
       DATABASE_URL: postgres://hermes:${HERMES_ALPHA_DB_PASSWORD}@db:5432/hermes
       PAPERCLIP_HOME: /paperclip
-      PAPERCLIP_DEPLOYMENT_MODE: authenticated
-      PAPERCLIP_DEPLOYMENT_EXPOSURE: public
       PAPERCLIP_PUBLIC_URL: https://${HERMES_ALPHA_DOMAIN}
-    # The production image builds ui and server only; the CLI is run from
-    # source with the tsx loader the image already ships for the server.
-    command: ["node", "cli/node_modules/tsx/dist/cli.mjs", "cli/src/index.ts", "auth", "bootstrap-ceo", "--base-url", "https://${HERMES_ALPHA_DOMAIN}"]
+      HERMES_ALPHA_DOMAIN: ${HERMES_ALPHA_DOMAIN}
+    # The production image builds ui and server only, so the CLI runs from
+    # source through the tsx loader the image ships for the server. The CLI
+    # also insists on a config file; a minimal authenticated/postgres config
+    # is written to this container's /tmp (the server volume is untouched)
+    # and the database comes from DATABASE_URL. `$$` is a literal `$` for
+    # the shell after Compose interpolation.
+    command:
+      - sh
+      - -c
+      - |
+        printf '%s' '{"$$meta":{"version":1,"updatedAt":"2026-01-01T00:00:00.000Z","source":"configure"},"logging":{"mode":"file"},"server":{"deploymentMode":"authenticated","deploymentExposure":"public"},"database":{"mode":"postgres"},"auth":{"baseUrlMode":"explicit","publicBaseUrl":"https://'"$$HERMES_ALPHA_DOMAIN"'"}}' > /tmp/bootstrap-config.json
+        exec node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts auth bootstrap-ceo --config /tmp/bootstrap-config.json --base-url "https://$$HERMES_ALPHA_DOMAIN"
     depends_on:
       server:
         condition: service_healthy

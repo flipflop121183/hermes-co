@@ -97,6 +97,34 @@ explicit *manual* synthetic task (no scheduler), and create one Business Ops off
 order, and document as an owner. Confirm an agent API key gets 403 on the
 Business Ops routes.
 
+## Hostinger VPS variant (Docker Manager, no SSH)
+
+Hostinger VPS instances built from the "Ubuntu 24.04 with Docker and Traefik"
+template run Traefik on host ports 80/443 (host network, Let's Encrypt HTTP
+challenge, 80 -> 443 redirect, Docker provider with `exposedByDefault=false`).
+Caddy cannot bind there, and the Docker Manager writes only a compose file and
+its `.env`, so the Caddyfile bind mount is unavailable. Use
+`docker/docker-compose.alpha.hostinger.yml`:
+
+1. In hPanel (VPS -> Docker Manager) or through the VPS API
+   `vps_docker_create`, create project `hermes-alpha` from the raw contents of
+   that file and paste the same variables listed in `docker/alpha/.env.example`
+   into the environment box. Never commit the filled values.
+2. Add a DNS `A` record for `HERMES_ALPHA_DOMAIN` pointing at the VM's IPv4
+   before `up`, or the HTTP challenge fails and Traefik serves its default
+   certificate.
+3. Traefik picks up the `hermes-alpha` router from labels; no Traefik change
+   is needed. The `traefik.docker.network` label pins it to the project's
+   `edge` network.
+4. Continue at "First admin" above using
+   `docker compose -p hermes-alpha exec server node cli/dist/index.js auth bootstrap-ceo`
+   from an SSH session, or the Docker Manager's container terminal.
+
+Verified on 2026-11-13: `docker compose config` parses the file, and the same
+fail-closed assertions as the CI preflight pass against it (scheduler off, no
+published ports, digest-only image, strict secrets, authenticated mode).
+Not verified: a live Traefik route; no container was started.
+
 ## Rollback
 
 - Previous digest: record it in `docker/alpha/.env` as a comment before every

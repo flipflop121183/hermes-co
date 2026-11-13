@@ -32,6 +32,7 @@ const agentRuntimeBase = read("docker", "agent-runtime", "Dockerfile.base");
 const compose = read("docker", "docker-compose.yml");
 const quickstartCompose = read("docker", "docker-compose.quickstart.yml");
 const alphaCompose = read("docker", "docker-compose.alpha.yml");
+const alphaHostingerCompose = read("docker", "docker-compose.alpha.hostinger.yml");
 const ecsTaskDefinition = JSON.parse(read("docker", "ecs-task-definition.json")) as {
   containerDefinitions: { name: string; image: string; linuxParameters?: { initProcessEnabled?: boolean } }[];
 };
@@ -100,6 +101,7 @@ describe("deployment manifest parity", () => {
     ["docker-compose.yml", compose],
     ["docker-compose.quickstart.yml", quickstartCompose],
     ["docker-compose.alpha.yml", alphaCompose],
+    ["docker-compose.alpha.hostinger.yml", alphaHostingerCompose],
   ])("caps pids in %s", (_name, source) => {
     expect(
       /^\s{4}pids_limit:\s*\d+\s*$/m.test(source),
@@ -112,6 +114,7 @@ describe("deployment manifest parity", () => {
     ["docker-compose.yml", compose],
     ["docker-compose.quickstart.yml", quickstartCompose],
     ["docker-compose.alpha.yml", alphaCompose],
+    ["docker-compose.alpha.hostinger.yml", alphaHostingerCompose],
   ])("does not also set init in %s, which would nest docker-init around tini", (_name, source) => {
     // The image owns PID 1, so no per-orchestrator lever is needed. Setting
     // `init: true` here as well makes tini warn it is not PID 1 on every boot.

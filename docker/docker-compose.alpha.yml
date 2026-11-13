@@ -9,7 +9,7 @@
 #   docker compose --env-file docker/alpha/.env -f docker/docker-compose.alpha.yml pull
 #   docker compose --env-file docker/alpha/.env -f docker/docker-compose.alpha.yml up -d
 #   docker compose --env-file docker/alpha/.env -f docker/docker-compose.alpha.yml exec server \
-#     node cli/dist/index.js auth bootstrap-ceo
+#     node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts auth bootstrap-ceo
 #
 # Full sequence, gates, and rollback: doc/plans/2026-11-10-alpha-deploy.md
 name: ${HERMES_ALPHA_PROJECT:-hermes-alpha}

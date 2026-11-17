@@ -1,0 +1,120 @@
+# Alpha deployment on a Hostinger VPS built from the "Ubuntu 24.04 with
+# Docker and Traefik" template, deployed through the Hostinger Docker Manager
+# (hPanel or the VPS API `vps_docker_create`).
+#
+# Differences from docker/docker-compose.alpha.yml:
+# - No Caddy. The template's Traefik already owns host ports 80/443 (host
+#   network mode, Let's Encrypt HTTP challenge, 80 -> 443 redirect) and routes
+#   by container labels. Docker Manager writes only the compose file and its
+#   .env, so a bind-mounted Caddyfile is not available there anyway.
+# - The server joins a named `edge` network and tells Traefik to use it, so
+#   Traefik never tries the internal-only database network.
+#
+# Same fail-closed defaults otherwise: authenticated + public, immutable
+# digest, no published database port, migrations at boot, hourly backups,
+# strict secrets mode, heartbeat scheduler off until separately enabled.
+#
+# Environment (paste into the Docker Manager env box, never into this file):
+#   HERMES_ALPHA_IMAGE, HERMES_ALPHA_DOMAIN, HERMES_ALPHA_DB_PASSWORD,
+#   HERMES_ALPHA_AUTH_SECRET, HERMES_ALPHA_TOOL_SIGNING_SECRET,
+#   HERMES_ALPHA_DISABLE_SIGN_UP (optional), provider keys (optional).
+# See doc/plans/2026-11-10-alpha-deploy.md for the sequence and rollback.
+name: ${HERMES_ALPHA_PROJECT:-hermes-alpha}
+
+services:
+  db:
+    image: ${HERMES_ALPHA_POSTGRES_IMAGE:-postgres:17-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hermes
+      POSTGRES_PASSWORD: ${HERMES_ALPHA_DB_PASSWORD:?Set HERMES_ALPHA_DB_PASSWORD (openssl rand -hex 24)}
+      POSTGRES_DB: hermes
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - alpha-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hermes -d hermes"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    # No `ports:` on purpose. Postgres is reachable only from `server`.
+    networks: [internal]
+
+  server:
+    # Immutable digest only, e.g. ghcr.io/flipflop121183/hermes-co@sha256:<digest>
+    image: ${HERMES_ALPHA_IMAGE:?Set HERMES_ALPHA_IMAGE to an immutable ghcr digest}
+    restart: unless-stopped
+    pids_limit: 2048
+    environment:
+      DATABASE_URL: postgres://hermes:${HERMES_ALPHA_DB_PASSWORD}@db:5432/hermes
+      HOST: "0.0.0.0"
+      PORT: "3100"
+      SERVE_UI: "true"
+      PAPERCLIP_HOME: /paperclip
+
+      PAPERCLIP_DEPLOYMENT_MODE: authenticated
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: public
+      PAPERCLIP_PUBLIC_URL: https://${HERMES_ALPHA_DOMAIN:?Set HERMES_ALPHA_DOMAIN (the public hostname)}
+      # Traefik is the only hop in front of the server.
+      TRUST_PROXY: "1"
+
+      BETTER_AUTH_SECRET: ${HERMES_ALPHA_AUTH_SECRET:?Set HERMES_ALPHA_AUTH_SECRET (openssl rand -hex 32)}
+      PAPERCLIP_TOOL_ACTION_SIGNING_SECRET: ${HERMES_ALPHA_TOOL_SIGNING_SECRET:?Set HERMES_ALPHA_TOOL_SIGNING_SECRET (openssl rand -hex 32)}
+
+      # Single replica only. Two replicas need PAPERCLIP_MIGRATION_PROMPT=never
+      # and a separate `pnpm db:migrate` step.
+      PAPERCLIP_MIGRATION_AUTO_APPLY: "true"
+      PAPERCLIP_SECRETS_STRICT_MODE: "true"
+      PAPERCLIP_AUTH_DISABLE_SIGN_UP: ${HERMES_ALPHA_DISABLE_SIGN_UP:-false}
+
+      PAPERCLIP_DB_BACKUP_ENABLED: "true"
+      PAPERCLIP_DB_BACKUP_DIR: /paperclip/backups
+      PAPERCLIP_DB_BACKUP_INTERVAL_MINUTES: "60"
+      PAPERCLIP_DB_BACKUP_RETENTION_DAYS: "7"
+
+      # Isolation gate: the alpha must never dispatch the existing hosted bots.
+      # Enable only after the acceptance checks in the plan document pass.
+      HEARTBEAT_SCHEDULER_ENABLED: "false"
+
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    labels:
+      traefik.enable: "true"
+      # Pin Traefik to the routable network; `internal` has no host route.
+      traefik.docker.network: ${HERMES_ALPHA_PROJECT:-hermes-alpha}_edge
+      traefik.http.routers.hermes-alpha.rule: Host(`${HERMES_ALPHA_DOMAIN}`)
+      traefik.http.routers.hermes-alpha.entrypoints: websecure
+      traefik.http.routers.hermes-alpha.tls: "true"
+      traefik.http.routers.hermes-alpha.tls.certresolver: letsencrypt
+      traefik.http.services.hermes-alpha.loadbalancer.server.port: "3100"
+      # SSE and long run streams must not be buffered or cut.
+      traefik.http.services.hermes-alpha.loadbalancer.responseforwarding.flushinterval: "-1ms"
+      traefik.http.middlewares.hermes-alpha-headers.headers.stsSeconds: "31536000"
+      traefik.http.middlewares.hermes-alpha-headers.headers.contentTypeNosniff: "true"
+      traefik.http.middlewares.hermes-alpha-headers.headers.referrerPolicy: strict-origin-when-cross-origin
+      traefik.http.routers.hermes-alpha.middlewares: hermes-alpha-headers
+    volumes:
+      # Uploads, workspaces, backups and the secrets master key. Back it up
+      # separately from the database (doc/DATABASE.md).
+      - alpha-app:/paperclip
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal, edge]
+
+networks:
+  internal:
+    internal: true
+  edge: {}
+
+volumes:
+  alpha-db:
+  alpha-app:

@@ -1,5 +1,29 @@
 # Release Automation Setup
 
+## Hermes fork boundary
+
+`release.yml` is the inherited Paperclip npm release pipeline. Its jobs run only
+in `paperclipai/paperclip`. In `flipflop121183/hermes-co`, scheduled and manual
+runs skip these jobs. This is intentional, not a missing npm credential.
+
+The fork contains upstream release tags and upstream package names. Before this
+guard, nightly selection could choose an old inherited canary rather than the
+current Hermes source, then attempt to publish `@paperclipai/*` packages. Do not
+repair this by adding an upstream npm token or trusted publisher to this fork.
+
+Hermes container builds use the separate `.github/workflows/docker.yml` and the
+repository-local `ghcr.io/flipflop121183/hermes-co` destination. This change does
+not dispatch that workflow, publish a package or image, or deploy an instance.
+An approved Hermes npm release would need its own package ownership, names,
+source-selection policy, and reviewed release workflow first.
+
+Validate the fork boundary with `node --test scripts/release-lib.test.mjs`.
+After this change is merged, confirm that the next scheduled Release run skips
+all upstream jobs. A skipped release is not deployment or runtime acceptance.
+
+The remaining sections describe upstream Paperclip setup, not authorization to
+configure upstream publishing for Hermes.
+
 This document covers the GitHub and npm setup required for the current Paperclip release model:
 
 - automatic canaries from `master`

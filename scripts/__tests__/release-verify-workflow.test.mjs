@@ -88,7 +88,7 @@ test("canary reuses exact-source proof while stable keeps full verification", ()
   assert.match(canary, /SOURCE_SHA: \$\{\{ github\.sha \}\}/);
   assert.match(canary, /run: node scripts\/cloud-source-verification\.mjs "\$SOURCE_SHA"/);
   assert.doesNotMatch(canary, /release-verify\.yml|continue-on-error|always\(\)/);
-  assert.match(releaseWorkflow, /publish_canary:\n\s+if: github\.event_name == 'push'\n\s+needs: verify_canary/);
+  assert.match(releaseWorkflow, /publish_canary:\n\s+if: github\.repository == 'paperclipai\/paperclip' && \(github\.event_name == 'push'\)\n\s+needs: verify_canary/);
   // The stable lane is gated on the stable channel since the nightly lane
   // was added; a `needs:` line (for example a preflight job) may sit between
   // the gate and the delegation.
@@ -96,7 +96,7 @@ test("canary reuses exact-source proof while stable keeps full verification", ()
   // once; verification must consume that pin, not re-resolve the ref.
   assert.match(
     releaseWorkflow,
-    /verify_stable:\n\s+if: github\.event_name == 'workflow_dispatch' && inputs\.channel == 'stable'\n(?:\s+needs: [^\n]+\n)?\s+uses: \.\/\.github\/workflows\/release-verify\.yml\n\s+with:\n\s+ref: \$\{\{ needs\.preflight_stable\.outputs\.sha \}\}/,
+    /verify_stable:\n\s+if: github\.repository == 'paperclipai\/paperclip' && \(github\.event_name == 'workflow_dispatch' && inputs\.channel == 'stable'\)\n(?:\s+needs: [^\n]+\n)?\s+uses: \.\/\.github\/workflows\/release-verify\.yml\n\s+with:\n\s+ref: \$\{\{ needs\.preflight_stable\.outputs\.sha \}\}/,
   );
   assert.doesNotMatch(
     releaseWorkflow,
@@ -275,7 +275,7 @@ test("candidate-branch betas are validated and fully verified before publish", (
   assert.match(releaseWorkflow, /candidate\/beta-\*\)/);
   assert.match(
     releaseWorkflow,
-    /verify_beta_candidate:\n\s+needs: select_beta\n\s+if: needs\.select_beta\.outputs\.mode == 'candidate'\n\s+uses: \.\/\.github\/workflows\/release-verify\.yml/,
+    /verify_beta_candidate:\n\s+needs: select_beta\n\s+if: github\.repository == 'paperclipai\/paperclip' && \(needs\.select_beta\.outputs\.mode == 'candidate'\)\n\s+uses: \.\/\.github\/workflows\/release-verify\.yml/,
   );
   assert.match(
     releaseWorkflow,
@@ -292,7 +292,7 @@ test("post-publish beta smoke survives the skipped candidate-verification ancest
   // silently skips the smoke. The condition must stay explicit.
   assert.match(
     releaseWorkflow,
-    /smoke_beta:\n\s+needs: publish_beta\n\s+if: \$\{\{ !cancelled\(\) && needs\.publish_beta\.result == 'success' && !inputs\.dry_run \}\}/,
+    /smoke_beta:\n\s+needs: publish_beta\n\s+if: github\.repository == 'paperclipai\/paperclip' && \(!cancelled\(\) && needs\.publish_beta\.result == 'success' && !inputs\.dry_run\)/,
   );
 });
 
@@ -305,7 +305,7 @@ test("published canaries are gated by the exact-version onboarding browser smoke
   );
   assert.match(
     releaseWorkflow,
-    /smoke_canary_onboarding:\n\s+needs: publish_canary\n\s+if: needs\.publish_canary\.result == 'success'/,
+    /smoke_canary_onboarding:\n\s+needs: publish_canary\n\s+if: github\.repository == 'paperclipai\/paperclip' && \(needs\.publish_canary\.result == 'success'\)/,
   );
   assert.match(
     releaseWorkflow,
